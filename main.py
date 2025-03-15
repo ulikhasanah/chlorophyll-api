@@ -3,26 +3,38 @@ import ee
 import numpy as np
 import datetime
 import joblib
-from fastapi import FastAPI
+import logging
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
-EE_CREDENTIALS = "./config/credentials"
+# Konfigurasi logging
+logging.basicConfig(level=logging.INFO)
 
-if os.path.exists(EE_CREDENTIALS):
-    os.environ["EARTHENGINE_TOKEN"] = EE_CREDENTIALS
-    ee.Authenticate()
-    ee.Initialize()
-else:
-    raise Exception("Earth Engine credentials not found. Upload them before deploying.")
+# Inisialisasi kredensial Google Earth Engine
+google_credentials = "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = google_credentials
 
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json"
+try:
+    service_account = "ee-ulikhasanah16-743b3ec3e985@developer.gserviceaccount.com"
+    credentials = ee.ServiceAccountCredentials(service_account, google_credentials)
+    ee.Initialize(credentials)
+    logging.info("Google Earth Engine initialized successfully.")
+except Exception as e:
+    logging.error(f"Failed to initialize Earth Engine: {e}")
+    raise
+
+# Load model
+try:
+    catboost_model = joblib.load("catboost_chlor_a.pkl")
+    logging.info("Model loaded successfully.")
+except Exception as e:
+    logging.error(f"Failed to load model: {e}")
+    raise
+
 # Define satellite data sources
 SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR_HARMONIZED"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
-
-# Load the trained CatBoost model
-catboost_model = joblib.load("catboost_chlor_a.pkl")
 
 app = FastAPI()
 
@@ -33,21 +45,17 @@ class Location(BaseModel):
 def get_nearest_data(lat, lon, collection_id, bands):
     point = ee.Geometry.Point(lon, lat)
     start_date = datetime.datetime.utcnow().strftime('%Y-%m-%d')
-    
     collection = (
         ee.ImageCollection(collection_id)
         .filterBounds(point)
         .filterDate(ee.Date(start_date).advance(-30, 'day'), ee.Date(start_date))
         .sort("system:time_start", False)
     )
-    
     image = collection.first()
-    
-    if image.getInfo():
+    if image is not None and image.getInfo():
         date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
         data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
         return {band: data.get(bands[band], None) for band in bands}, date_info
-    
     return None, None
 
 def get_nearest_sst(lat, lon):
@@ -58,14 +66,11 @@ def get_nearest_sst(lat, lon):
         .filterDate(ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')).advance(-30, 'day'), ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')))
         .sort("system:time_start", False)
     )
-    
     image = collection.first()
-    
-    if image.getInfo():
+    if image is not None and image.getInfo():
         date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
         data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
         return data.get("sst", None), date_info
-    
     return None, None
 
 def calculate_ndci(red, nir):
@@ -88,7 +93,7 @@ def process_request(lat, lon):
     selected_data = next((data_sources[sat] for sat in data_sources if data_sources[sat]), None)
     
     if not selected_data:
-        return {"error": f"No satellite data available for location ({lat}, {lon})"}
+        raise HTTPException(status_code=404, detail=f"No satellite data available for location ({lat}, {lon})")
     
     features = {
         "latitude": lat,
@@ -109,7 +114,7 @@ def process_request(lat, lon):
     
     missing_keys = [k for k, v in features.items() if v is None]
     if missing_keys:
-        return {"error": f"Data missing for location ({lat}, {lon}): {missing_keys}"}
+        raise HTTPException(status_code=400, detail=f"Data missing for location ({lat}, {lon}): {missing_keys}")
     
     input_data = np.array([[features[f] for f in features.keys()]])
     chl_a_prediction = catboost_model.predict(input_data)[0]
@@ -127,5 +132,5 @@ def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))  # Default ke 8000 jika tidak ada PORT
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
