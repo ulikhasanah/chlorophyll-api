@@ -127,9 +127,15 @@ def process_request(lat, lon):
         "sst_date": sst_date
     }
 
+# Endpoint utama untuk prediksi
 @app.post("/predict")
 def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon)
+
+# Tambahkan endpoint GET untuk memastikan API berjalan
+@app.get("/")
+def home():
+    return {"message": "FastAPI is running. Use /predict for predictions."}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
