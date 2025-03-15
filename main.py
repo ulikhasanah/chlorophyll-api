@@ -16,8 +16,7 @@ if os.path.exists(EE_CREDENTIALS):
 else:
     raise Exception("Earth Engine credentials not found. Upload them before deploying.")
 
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "ee-ulikhasanah16-743b3ec3e985.json"
-
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json"
 # Define satellite data sources
 SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR_HARMONIZED"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
