@@ -6,15 +6,17 @@ import joblib
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
+import json
 
-# Ensure the credentials file is available
-EE_CREDENTIALS = "./config/credentials"
+credentials_json = os.getenv("EARTHENGINE_CREDENTIALS")
+if credentials_json:
+    credentials_dict = json.loads(credentials_json)
+    with open("/tmp/credentials", "w") as f:
+        json.dump(credentials_dict, f)
 
-if os.path.exists(EE_CREDENTIALS):
-    os.environ["EARTHENGINE_TOKEN"] = EE_CREDENTIALS
-    ee.Initialize()
-else:
-    raise Exception("Earth Engine credentials not found. Upload them before deploying.")
+    os.environ["EARTHENGINE_CREDENTIALS"] = "/tmp/credentials"
+
+ee.Initialize()
 
 # Define satellite data sources
 SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR_HARMONIZED"}
