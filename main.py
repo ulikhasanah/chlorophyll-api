@@ -5,22 +5,19 @@ import datetime
 import joblib
 import logging
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
 
 # Konfigurasi logging
 logging.basicConfig(level=logging.INFO)
 
 # Inisialisasi kredensial Google Earth Engine
-google_credentials = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json")
-
-if not os.path.exists(google_credentials):
-    logging.error("Google Earth Engine credentials not found!")
-    raise Exception("Missing Google Earth Engine credentials")
+google_credentials = "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = google_credentials
 
 try:
-    service_account = os.getenv("GEE_SERVICE_ACCOUNT", "ee-ulikhasanah16-743b3ec3e985@developer.gserviceaccount.com")
+    service_account = "ee-ulikhasanah16-743b3ec3e985@developer.gserviceaccount.com"
     credentials = ee.ServiceAccountCredentials(service_account, google_credentials)
     ee.Initialize(credentials)
     logging.info("Google Earth Engine initialized successfully.")
@@ -29,9 +26,8 @@ except Exception as e:
     raise
 
 # Load model
-model_path = os.getenv("MODEL_PATH", "catboost_chlor_a.pkl")
 try:
-    catboost_model = joblib.load(model_path)
+    catboost_model = joblib.load("catboost_chlor_a.pkl")
     logging.info("Model loaded successfully.")
 except Exception as e:
     logging.error(f"Failed to load model: {e}")
@@ -43,54 +39,54 @@ BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12"
 
 app = FastAPI()
 
-# Tambahkan middleware CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Bisa diganti dengan domain tertentu
+    allow_origins=["*"],  # Bisa diubah ke domain tertentu
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 class Location(BaseModel):
     lat: float
     lon: float
 
 def get_nearest_data(lat, lon, collection_id, bands):
-    point = ee.Geometry.Point(lon, lat)
-    start_date = datetime.datetime.utcnow().strftime('%Y-%m-%d')
-    collection = (
-        ee.ImageCollection(collection_id)
-        .filterBounds(point)
-        .filterDate(ee.Date(start_date).advance(-30, 'day'), ee.Date(start_date))
-        .sort("system:time_start", False)
-    )
-    image = collection.first()
     try:
-        if image.getInfo():
+        point = ee.Geometry.Point(lon, lat)
+        start_date = datetime.datetime.utcnow().strftime('%Y-%m-%d')
+        collection = (
+            ee.ImageCollection(collection_id)
+            .filterBounds(point)
+            .filterDate(ee.Date(start_date).advance(-30, 'day'), ee.Date(start_date))
+            .sort("system:time_start", False)
+        )
+        image = collection.first()
+        if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
             data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
             return {band: data.get(bands[band], None) for band in bands}, date_info
-    except:
-        return None, None
+    except Exception as e:
+        logging.error(f"Failed to retrieve data from Earth Engine: {e}")
     return None, None
 
 def get_nearest_sst(lat, lon):
-    point = ee.Geometry.Point(lon, lat)
-    collection = (
-        ee.ImageCollection("NOAA/CDR/OISST/V2_1")
-        .filterBounds(point)
-        .filterDate(ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')).advance(-30, 'day'), ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')))
-        .sort("system:time_start", False)
-    )
-    image = collection.first()
     try:
-        if image.getInfo():
+        point = ee.Geometry.Point(lon, lat)
+        collection = (
+            ee.ImageCollection("NOAA/CDR/OISST/V2_1")
+            .filterBounds(point)
+            .filterDate(ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')).advance(-30, 'day'), ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')))
+            .sort("system:time_start", False)
+        )
+        image = collection.first()
+        if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
             data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
             return data.get("sst", None), date_info
-    except:
-        return None, None
+    except Exception as e:
+        logging.error(f"Failed to retrieve SST data: {e}")
     return None, None
 
 def calculate_ndci(red, nir):
@@ -156,5 +152,4 @@ def home():
     return {"message": "FastAPI is running. Use /predict for predictions."}
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
