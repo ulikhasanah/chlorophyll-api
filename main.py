@@ -13,14 +13,14 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 
 # Inisialisasi kredensial Google Earth Engine
-google_credentials = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "./ee_credentials.json")
+google_credentials = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json")
 
 if not os.path.exists(google_credentials):
     logging.error("Google Earth Engine credentials not found!")
     raise Exception("Missing Google Earth Engine credentials")
 
 try:
-    service_account = os.getenv("GEE_SERVICE_ACCOUNT", "ee-service-account@developer.gserviceaccount.com")
+    service_account = os.getenv("GEE_SERVICE_ACCOUNT", "ee-ulikhasanah16-743b3ec3e985@developer.gserviceaccount.com")
     credentials = ee.ServiceAccountCredentials(service_account, google_credentials)
     ee.Initialize(credentials)
     logging.info("Google Earth Engine initialized successfully.")
