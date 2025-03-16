@@ -5,6 +5,7 @@ import datetime
 import joblib
 import logging
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
@@ -12,11 +13,14 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 
 # Inisialisasi kredensial Google Earth Engine
-google_credentials = "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json"
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = google_credentials
+google_credentials = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "./ee_credentials.json")
+
+if not os.path.exists(google_credentials):
+    logging.error("Google Earth Engine credentials not found!")
+    raise Exception("Missing Google Earth Engine credentials")
 
 try:
-    service_account = "ee-ulikhasanah16-743b3ec3e985@developer.gserviceaccount.com"
+    service_account = os.getenv("GEE_SERVICE_ACCOUNT", "ee-service-account@developer.gserviceaccount.com")
     credentials = ee.ServiceAccountCredentials(service_account, google_credentials)
     ee.Initialize(credentials)
     logging.info("Google Earth Engine initialized successfully.")
@@ -25,8 +29,9 @@ except Exception as e:
     raise
 
 # Load model
+model_path = os.getenv("MODEL_PATH", "catboost_chlor_a.pkl")
 try:
-    catboost_model = joblib.load("catboost_chlor_a.pkl")
+    catboost_model = joblib.load(model_path)
     logging.info("Model loaded successfully.")
 except Exception as e:
     logging.error(f"Failed to load model: {e}")
@@ -37,6 +42,15 @@ SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR_HARMONIZED"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
 
 app = FastAPI()
+
+# Tambahkan middleware CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Bisa diganti dengan domain tertentu
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class Location(BaseModel):
     lat: float
@@ -52,10 +66,13 @@ def get_nearest_data(lat, lon, collection_id, bands):
         .sort("system:time_start", False)
     )
     image = collection.first()
-    if image is not None and image.getInfo():
-        date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
-        data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
-        return {band: data.get(bands[band], None) for band in bands}, date_info
+    try:
+        if image.getInfo():
+            date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
+            data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
+            return {band: data.get(bands[band], None) for band in bands}, date_info
+    except:
+        return None, None
     return None, None
 
 def get_nearest_sst(lat, lon):
@@ -67,10 +84,13 @@ def get_nearest_sst(lat, lon):
         .sort("system:time_start", False)
     )
     image = collection.first()
-    if image is not None and image.getInfo():
-        date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
-        data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
-        return data.get("sst", None), date_info
+    try:
+        if image.getInfo():
+            date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
+            data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
+            return data.get("sst", None), date_info
+    except:
+        return None, None
     return None, None
 
 def calculate_ndci(red, nir):
@@ -127,16 +147,14 @@ def process_request(lat, lon):
         "sst_date": sst_date
     }
 
-# Endpoint utama untuk prediksi
 @app.post("/predict")
 def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon)
 
-# Tambahkan endpoint GET untuk memastikan API berjalan
 @app.get("/")
 def home():
     return {"message": "FastAPI is running. Use /predict for predictions."}
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
