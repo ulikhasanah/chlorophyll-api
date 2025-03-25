@@ -5,7 +5,7 @@ import datetime
 import joblib
 import logging
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -52,15 +52,39 @@ class Location(BaseModel):
     satellite: str = Field("Sentinel-2", description="Satelit yang digunakan")
     date: str = Field(None, description="Tanggal format YYYY-MM-DD (opsional)")
 
+    @validator("lat")
+    def validate_lat(cls, v):
+        if not (-90 <= v <= 90):
+            raise ValueError("Latitude harus dalam rentang -90 hingga 90.")
+        return v
+
+    @validator("lon")
+    def validate_lon(cls, v):
+        if not (-180 <= v <= 180):
+            raise ValueError("Longitude harus dalam rentang -180 hingga 180.")
+        return v
+
+    @validator("date")
+    def validate_date(cls, v):
+        if v:
+            try:
+                datetime.datetime.strptime(v, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError("Format tanggal harus YYYY-MM-DD.")
+        return v
+
 def get_nearest_data(lat, lon, satellite, date):
     try:
         point = ee.Geometry.Point(lon, lat)
+        
+        # Menentukan rentang tanggal
         if date:
             start_date = ee.Date(date).advance(-15, 'day')
             end_date = ee.Date(date).advance(15, 'day')
         else:
-            start_date = ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d')).advance(-30, 'day')
-            end_date = ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+            today = datetime.datetime.utcnow().strftime('%Y-%m-%d')
+            start_date = ee.Date(today).advance(-30, 'day')
+            end_date = ee.Date(today)
         
         collection = (
             ee.ImageCollection(SATELLITES[satellite])
@@ -69,6 +93,7 @@ def get_nearest_data(lat, lon, satellite, date):
             .sort("system:time_start", False)
         )
         image = collection.first()
+        
         if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
             data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
@@ -82,7 +107,8 @@ def process_request(lat, lon, satellite, date):
     
     if not data:
         raise HTTPException(status_code=404, detail=f"No satellite data available for ({lat}, {lon})")
-    
+
+    # Menyusun fitur untuk model
     features = {
         "latitude": lat,
         "longitude": lon,
@@ -93,23 +119,31 @@ def process_request(lat, lon, satellite, date):
         "Red": data.get("Red"),
         "NIR": data.get("NIR"),
     }
-    
+
     features["dayofyear"] = datetime.datetime.strptime(retrieved_date, "%Y-%m-%d").timetuple().tm_yday
     features["day_sin"] = np.sin(2 * np.pi * features["dayofyear"] / 365)
     features["day_cos"] = np.cos(2 * np.pi * features["dayofyear"] / 365)
-    features["NDCI"] = (features["NIR"] - features["Red"]) / (features["NIR"] + features["Red"]) if (features["NIR"] + features["Red"]) != 0 else None
-    
+
+    # Menghitung NDCI dengan ZeroDivisionError handling
+    if features["NIR"] is not None and features["Red"] is not None:
+        denominator = features["NIR"] + features["Red"]
+        features["NDCI"] = (features["NIR"] - features["Red"]) / denominator if denominator != 0 else 0
+    else:
+        features["NDCI"] = None
+
+    # Cek jika ada nilai yang None
     missing_keys = [k for k, v in features.items() if v is None]
     if missing_keys:
         raise HTTPException(status_code=400, detail=f"Data missing for ({lat}, {lon}): {missing_keys}")
-    
+
+    # Prediksi menggunakan model
     input_data = np.array([[features[f] for f in features.keys()]])
     chl_a_prediction = catboost_model.predict(input_data)[0]
-    
+
     return {
         "lat": lat,
         "lon": lon,
-        "Chlorophyll-a": chl_a_prediction * 1000,
+        "Chlorophyll-a": chl_a_prediction * 1000,  # Konversi satuan jika perlu
         "date_used": retrieved_date,
         "satellite": satellite
     }
