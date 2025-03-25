@@ -138,7 +138,7 @@ def process_request(lat, lon):
     return {
         "lat": lat,
         "lon": lon,
-        "Chlorophyll-a": chl_a_prediction,
+        "Chlorophyll-a": chl_a_prediction*1000,
         "dates": dates,
         "sst_date": sst_date
     }
