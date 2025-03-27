@@ -1,21 +1,18 @@
 import os
-import io
 import ee
 import numpy as np
 import datetime
 import joblib
 import logging
-import pandas as pd
-from typing import List
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 
 # Konfigurasi logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 
-# Inisialisasi Google Earth Engine
+# Inisialisasi kredensial Google Earth Engine
 google_credentials = "/etc/secrets/ee-ulikhasanah16-743b3ec3e985.json"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = google_credentials
 
@@ -30,11 +27,12 @@ except Exception as e:
 
 try:
     catboost_model = joblib.load("catboost_chlor_a.pkl")
-    scaler = joblib.load("scaler.pkl")
-    logging.info("Model and scaler loaded successfully.")
+    logging.info("Model loaded successfully.")
 except Exception as e:
-    logging.error(f"Failed to load model or scaler: {e}")
+    logging.error(f"Failed to load model: {e}")
     raise
+
+scaler = joblib.load("scaler.pkl")
 
 SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
@@ -54,19 +52,23 @@ class Location(BaseModel):
     lon: float
     date: str = None
 
-class MultiLocation(BaseModel):
-    locations: List[Location]
-
 def get_nearest_data(lat, lon, collection_id, bands, target_date):
     try:
         point = ee.Geometry.Point(lon, lat)
         start_date = ee.Date(target_date) if target_date else ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
-        collection = (ee.ImageCollection(collection_id)
-                      .filterBounds(point)
-                      .filterDate(start_date.advance(-30, 'day'), start_date.advance(30, 'day'))
-                      .sort("system:time_start"))
+        collection = (
+            ee.ImageCollection(collection_id)
+            .filterBounds(point)
+            .filterDate(start_date.advance(-30, 'day'), start_date.advance(30, 'day'))
+        )
+        
+        def add_diff(image):
+            return image.set("date_diff", ee.Number(image.date().difference(start_date, "day")).abs())
+        
+        collection = collection.map(add_diff).sort("date_diff")
         image = collection.first()
-        if image and image.getInfo():
+        
+        if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
             data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
             return {band: data.get(bands[band], None) for band in bands}, date_info
@@ -74,57 +76,86 @@ def get_nearest_data(lat, lon, collection_id, bands, target_date):
         logging.error(f"Failed to retrieve data from Earth Engine: {e}")
     return None, None
 
+def get_nearest_sst(lat, lon, target_date):
+    try:
+        point = ee.Geometry.Point(lon, lat)
+        start_date = ee.Date(target_date) if target_date else ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+        collection = (
+            ee.ImageCollection("NOAA/CDR/OISST/V2_1")
+            .filterBounds(point)
+            .filterDate(start_date.advance(-30, 'day'), start_date.advance(30, 'day'))
+            .sort("system:time_start")
+        )
+        image = collection.first()
+        if image is not None and image.getInfo():
+            date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
+            data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
+            return data.get("sst", None), date_info
+    except Exception as e:
+        logging.error(f"Failed to retrieve SST data: {e}")
+    return None, None
+
 def calculate_ndci(red, nir):
-    return (nir - red) / (nir + red) if (red is not None and nir is not None and (nir + red) != 0) else None
+    if red is None or nir is None:
+        return None
+    return (nir - red) / (nir + red) if (nir + red) != 0 else None
 
 def process_request(lat, lon, date):
-    data, date_info = get_nearest_data(lat, lon, SATELLITES["Sentinel-2"], BANDS["Sentinel-2"], date)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"No satellite data available for ({lat}, {lon}) on {date}")
+    data_sources = {}
+    dates = {}
+    
+    for sat in ["Sentinel-2"]:
+        data, date_info = get_nearest_data(lat, lon, SATELLITES[sat], BANDS[sat], date)
+        if data:
+            data_sources[sat] = data
+            dates[sat] = date_info
+    
+    sst_value, sst_date = get_nearest_sst(lat, lon, date)
+    selected_data = next((data_sources[sat] for sat in data_sources if data_sources[sat]), None)
+    
+    if not selected_data:
+        raise HTTPException(status_code=404, detail=f"No satellite data available for location ({lat}, {lon}) on {date}")
     
     features = {
-        "latitude": lat, "longitude": lon,
-        "SWIR1": data.get("SWIR1"), "SWIR2": data.get("SWIR2"),
-        "Blue": data.get("Blue"), "Green": data.get("Green"),
-        "Red": data.get("Red"), "NIR": data.get("NIR"),
-        "NDCI": calculate_ndci(data.get("Red"), data.get("NIR"))
+        "latitude": lat,
+        "longitude": lon,
+        "SWIR1": selected_data.get("SWIR1"),
+        "SWIR2": selected_data.get("SWIR2"),
+        "Blue": selected_data.get("Blue"),
+        "Green": selected_data.get("Green"),
+        "Red": selected_data.get("Red"),
+        "NIR": selected_data.get("NIR"),
+        "sst": sst_value if sst_value is not None else 0
     }
     
-    if any(v is None for v in features.values()):
-        missing = [k for k, v in features.items() if v is None]
-        raise HTTPException(status_code=400, detail=f"Missing data for {missing} at ({lat}, {lon})")
+    features["dayofyear"] = datetime.datetime.strptime(dates["Sentinel-2"], "%Y-%m-%d").timetuple().tm_yday if "Sentinel-2" in dates else datetime.datetime.now().timetuple().tm_yday
+    features["day_sin"] = np.sin(2 * np.pi * features["dayofyear"] / 365)
+    features["day_cos"] = np.cos(2 * np.pi * features["dayofyear"] / 365)
+    features["NDCI"] = calculate_ndci(features["Red"], features["NIR"])
+    
+    missing_keys = [k for k, v in features.items() if v is None]
+    if missing_keys:
+        raise HTTPException(status_code=400, detail=f"Data missing for location ({lat}, {lon}): {missing_keys}")
     
     input_data = np.array([[features[f] for f in features.keys()]])
     normalized_input = scaler.transform(input_data)
     chl_a_prediction = catboost_model.predict(normalized_input)[0]
     
-    return {"lat": lat, "lon": lon, "Chlorophyll-a": chl_a_prediction * 1000, "date": date_info}
+    return {
+        "lat": lat,
+        "lon": lon,
+        "Chlorophyll-a": chl_a_prediction * 1000,
+        "dates": dates,
+        "sst_date": sst_date
+    }
 
 @app.post("/predict")
 def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon, data.date)
 
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    try:
-        contents = await file.read()
-        file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-        if file_extension not in ["csv", "xls", "xlsx"]:
-            raise HTTPException(status_code=400, detail="Invalid file format. Use CSV or Excel.")
-        
-        df = pd.read_csv(io.BytesIO(contents)) if file_extension == "csv" else pd.read_excel(io.BytesIO(contents))
-        if not {"lat", "lon", "date"}.issubset(df.columns):
-            raise HTTPException(status_code=400, detail="File must contain 'lat', 'lon', 'date' columns.")
-        
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        if df["date"].isna().any():
-            raise HTTPException(status_code=400, detail="Invalid dates detected.")
-        
-        results = [process_request(row["lat"], row["lon"], row["date"].strftime('%Y-%m-%d')) for _, row in df.iterrows()]
-        return {"predictions": results}
-    except Exception as e:
-        logging.error(f"Error processing file: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+@app.get("/")
+def home():
+    return {"message": "FastAPI is running. Use /predict for predictions."}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
