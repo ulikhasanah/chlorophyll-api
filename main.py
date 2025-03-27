@@ -25,7 +25,6 @@ except Exception as e:
     logging.error(f"Failed to initialize Earth Engine: {e}")
     raise
 
-# Load model
 try:
     catboost_model = joblib.load("catboost_chlor_a.pkl")
     logging.info("Model loaded successfully.")
@@ -33,7 +32,8 @@ except Exception as e:
     logging.error(f"Failed to load model: {e}")
     raise
 
-# Define satellite data sources
+scaler = joblib.load("scaler.pkl")
+
 SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
 
@@ -50,7 +50,7 @@ app.add_middleware(
 class Location(BaseModel):
     lat: float
     lon: float
-    date: str = None  # Optional date input
+    date: str = None
 
 def get_nearest_data(lat, lon, collection_id, bands, target_date):
     try:
@@ -60,9 +60,14 @@ def get_nearest_data(lat, lon, collection_id, bands, target_date):
             ee.ImageCollection(collection_id)
             .filterBounds(point)
             .filterDate(start_date.advance(-30, 'day'), start_date.advance(30, 'day'))
-            .sort("system:time_start", False)
         )
+        
+        def add_diff(image):
+            return image.set("date_diff", ee.Number(image.date().difference(start_date, "day")).abs())
+        
+        collection = collection.map(add_diff).sort("date_diff")
         image = collection.first()
+        
         if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
             data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
@@ -79,7 +84,7 @@ def get_nearest_sst(lat, lon, target_date):
             ee.ImageCollection("NOAA/CDR/OISST/V2_1")
             .filterBounds(point)
             .filterDate(start_date.advance(-30, 'day'), start_date.advance(30, 'day'))
-            .sort("system:time_start", False)
+            .sort("system:time_start")
         )
         image = collection.first()
         if image is not None and image.getInfo():
@@ -106,7 +111,6 @@ def process_request(lat, lon, date):
             dates[sat] = date_info
     
     sst_value, sst_date = get_nearest_sst(lat, lon, date)
-    
     selected_data = next((data_sources[sat] for sat in data_sources if data_sources[sat]), None)
     
     if not selected_data:
@@ -134,7 +138,8 @@ def process_request(lat, lon, date):
         raise HTTPException(status_code=400, detail=f"Data missing for location ({lat}, {lon}): {missing_keys}")
     
     input_data = np.array([[features[f] for f in features.keys()]])
-    chl_a_prediction = catboost_model.predict(input_data)[0]
+    normalized_input = scaler.transform(input_data)
+    chl_a_prediction = catboost_model.predict(normalized_input)[0]
     
     return {
         "lat": lat,
