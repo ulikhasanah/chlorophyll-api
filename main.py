@@ -71,17 +71,32 @@ def predict_multiple_chlorophyll(data: MultiLocation):
     return results
 
 @app.post("/upload")
-def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...)):
     try:
-        df = pd.read_csv(file.file) if file.filename.endswith('.csv') else pd.read_excel(file.file)
-        if not all(col in df.columns for col in ['lat', 'lon', 'date']):
+        contents = await file.read()
+        file_extension = file.filename.split('.')[-1].lower()
+        
+        # Pilih parser sesuai ekstensi file
+        if file_extension == "csv":
+            df = pd.read_csv(pd.io.common.BytesIO(contents))
+        elif file_extension in ["xls", "xlsx"]:
+            df = pd.read_excel(pd.io.common.BytesIO(contents))
+        else:
+            raise HTTPException(status_code=400, detail="File must be CSV or Excel format.")
+        
+        # Validasi kolom
+        required_cols = {'lat', 'lon', 'date'}
+        if not required_cols.issubset(df.columns):
             raise HTTPException(status_code=400, detail="File must contain 'lat', 'lon', and 'date' columns.")
         
+        # Proses data
         results = [process_request(row['lat'], row['lon'], row['date']) for _, row in df.iterrows()]
-        return results
+        return {"predictions": results}
+    
     except Exception as e:
         logging.error(f"Error processing file: {e}")
-        raise HTTPException(status_code=500, detail="Error processing file.")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
