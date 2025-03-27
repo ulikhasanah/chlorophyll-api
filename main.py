@@ -4,6 +4,7 @@ import numpy as np
 import datetime
 import joblib
 import logging
+from typing import List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
@@ -51,6 +52,9 @@ class Location(BaseModel):
     lat: float
     lon: float
     date: str = None
+
+class MultiLocation(BaseModel):
+    locations: List[Location]
 
 def get_nearest_data(lat, lon, collection_id, bands, target_date):
     try:
@@ -133,10 +137,6 @@ def process_request(lat, lon, date):
     features["day_cos"] = np.cos(2 * np.pi * features["dayofyear"] / 365)
     features["NDCI"] = calculate_ndci(features["Red"], features["NIR"])
     
-    missing_keys = [k for k, v in features.items() if v is None]
-    if missing_keys:
-        raise HTTPException(status_code=400, detail=f"Data missing for location ({lat}, {lon}): {missing_keys}")
-    
     input_data = np.array([[features[f] for f in features.keys()]])
     normalized_input = scaler.transform(input_data)
     chl_a_prediction = catboost_model.predict(normalized_input)[0]
@@ -152,10 +152,11 @@ def process_request(lat, lon, date):
 @app.post("/predict")
 def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon, data.date)
-
-@app.get("/")
-def home():
-    return {"message": "FastAPI is running. Use /predict for predictions."}
+  
+@app.post("/predict-multi")
+def predict_multiple_chlorophyll(data: MultiLocation):
+    results = [process_request(loc.lat, loc.lon, loc.date) for loc in data.locations]
+    return results
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
