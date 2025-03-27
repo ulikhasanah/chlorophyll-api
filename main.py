@@ -4,10 +4,11 @@ import numpy as np
 import datetime
 import joblib
 import logging
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
 
 # Konfigurasi logging
 logging.basicConfig(level=logging.INFO)
@@ -55,7 +56,6 @@ SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
 
 # Fungsi untuk mendapatkan data citra satelit
-
 def get_satellite_data(lat, lon, collection_id, bands, target_date):
     try:
         point = ee.Geometry.Point(lon, lat)
@@ -81,7 +81,6 @@ def get_satellite_data(lat, lon, collection_id, bands, target_date):
     return None, None
 
 # Fungsi untuk mendapatkan data SST
-
 def get_sst_data(lat, lon, target_date):
     try:
         point = ee.Geometry.Point(lon, lat)
@@ -109,7 +108,6 @@ def calculate_ndci(red, nir):
     return (nir - red) / (nir + red) if (nir + red) != 0 else None
 
 # Fungsi utama untuk memproses prediksi
-
 def process_request(lat, lon, date):
     data_sources, dates = {}, {}
     
@@ -125,17 +123,7 @@ def process_request(lat, lon, date):
     if not selected_data:
         raise HTTPException(status_code=404, detail=f"No satellite data available for location ({lat}, {lon}) on {date}")
     
-    features = {
-        "latitude": lat,
-        "longitude": lon,
-        "SWIR1": selected_data.get("SWIR1"),
-        "SWIR2": selected_data.get("SWIR2"),
-        "Blue": selected_data.get("Blue"),
-        "Green": selected_data.get("Green"),
-        "Red": selected_data.get("Red"),
-        "NIR": selected_data.get("NIR"),
-        "sst": sst_value if sst_value is not None else 0
-    }
+    features = {"latitude": lat, "longitude": lon, "SWIR1": selected_data.get("SWIR1"), "SWIR2": selected_data.get("SWIR2"), "Blue": selected_data.get("Blue"), "Green": selected_data.get("Green"), "Red": selected_data.get("Red"), "NIR": selected_data.get("NIR"), "sst": sst_value if sst_value is not None else 0}
     
     features["dayofyear"] = datetime.datetime.strptime(dates["Sentinel-2"], "%Y-%m-%d").timetuple().tm_yday
     features["day_sin"] = np.sin(2 * np.pi * features["dayofyear"] / 365)
@@ -152,9 +140,13 @@ def process_request(lat, lon, date):
 def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon, data.date)
 
+@app.get("/upload")
+def upload_file(file: UploadFile = File(...)):
+    df = pd.read_csv(file.file)
+    results = [process_request(row["lat"], row["lon"], row["date"]) for _, row in df.iterrows()]
+    return results
+
 @app.get("/")
 def home():
-    return {"message": "FastAPI is running. Use /predict for predictions."}
+    return {"message": "FastAPI is running. Use /predict or /upload for predictions."}
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
