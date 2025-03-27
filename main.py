@@ -34,7 +34,7 @@ except Exception as e:
     raise
 
 # Define satellite data sources
-SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR_HARMONIZED"}
+SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
 
 app = FastAPI()
