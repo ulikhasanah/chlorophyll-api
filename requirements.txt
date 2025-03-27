@@ -9,3 +9,4 @@ catboost
 click>=8.1.3
 typing-extensions>=4.10.0
 scikit-learn
+python-multipart
