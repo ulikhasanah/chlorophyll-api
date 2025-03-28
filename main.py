@@ -140,7 +140,7 @@ def process_request(lat, lon, date):
 def predict_chlorophyll(data: Location):
     return process_request(data.lat, data.lon, data.date)
 
-@app.get("/upload")
+@app.post("/upload")
 def upload_file(file: UploadFile = File(...)):
     df = pd.read_csv(file.file)
     results = [process_request(row["lat"], row["lon"], row["date"]) for _, row in df.iterrows()]
