@@ -52,8 +52,15 @@ class Location(BaseModel):
     date: str = None
 
 # Konfigurasi satelit & band
-SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR"}
-BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
+SATELLITES = {
+    "Sentinel-2": "COPERNICUS/S2_SR",
+    "VIIRS": "NOAA/VIIRS/001/VNP09GA"
+}
+
+BANDS = {
+    "Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"},
+    "VIIRS": {"Red": "M5", "NIR": "M7", "SWIR1": "M10", "SWIR2": "M11", "Blue": "M3", "Green": "M4"}
+}
 
 # Fungsi untuk membuat area 3x3 piksel (90x90 meter, approx)
 def get_rectangle_area(lat, lon, pixel_size=30, pixel_count=3):
@@ -126,31 +133,35 @@ def calculate_ndci(red, nir):
 def process_request(lat, lon, date):
     data_sources, dates = {}, {}
 
-    for sat in ["Sentinel-2"]:
+    for sat in SATELLITES:
         data, date_info = get_satellite_data(lat, lon, SATELLITES[sat], BANDS[sat], date)
         if data:
             data_sources[sat] = data
             dates[sat] = date_info
 
     sst_value, sst_date = get_sst_data(lat, lon, date)
-    selected_data = next((data_sources[sat] for sat in data_sources if data_sources[sat]), None)
 
-    if not selected_data:
+    # Gunakan Sentinel-2 jika tersedia, jika tidak gunakan VIIRS
+    selected_sat = "Sentinel-2" if "Sentinel-2" in data_sources else "VIIRS" if "VIIRS" in data_sources else None
+    if not selected_sat:
         raise HTTPException(status_code=404, detail=f"No satellite data available for location ({lat}, {lon}) on {date}")
+
+    selected_data = data_sources[selected_sat]
+    band_mapping = BANDS[selected_sat]
 
     features = {
         "latitude": lat,
         "longitude": lon,
-        "SWIR1": selected_data.get("SWIR1"),
-        "SWIR2": selected_data.get("SWIR2"),
-        "Blue": selected_data.get("Blue"),
-        "Green": selected_data.get("Green"),
-        "Red": selected_data.get("Red"),
-        "NIR": selected_data.get("NIR"),
+        "SWIR1": selected_data.get(band_mapping["SWIR1"]),
+        "SWIR2": selected_data.get(band_mapping["SWIR2"]),
+        "Blue": selected_data.get(band_mapping["Blue"]),
+        "Green": selected_data.get(band_mapping["Green"]),
+        "Red": selected_data.get(band_mapping["Red"]),
+        "NIR": selected_data.get(band_mapping["NIR"]),
         "sst": sst_value if sst_value is not None else 0
     }
 
-    features["dayofyear"] = datetime.datetime.strptime(dates["Sentinel-2"], "%Y-%m-%d").timetuple().tm_yday
+    features["dayofyear"] = datetime.datetime.strptime(dates[selected_sat], "%Y-%m-%d").timetuple().tm_yday
     features["day_sin"] = np.sin(2 * np.pi * features["dayofyear"] / 365)
     features["day_cos"] = np.cos(2 * np.pi * features["dayofyear"] / 365)
     features["NDCI"] = calculate_ndci(features["Red"], features["NIR"])
@@ -163,9 +174,11 @@ def process_request(lat, lon, date):
         "lat": lat,
         "lon": lon,
         "Chlorophyll-a": chl_a_prediction * 1000,
+        "used_satellite": selected_sat,
         "dates": dates,
         "sst_date": sst_date
     }
+
 
 @app.post("/predict")
 def predict_chlorophyll(data: Location):
