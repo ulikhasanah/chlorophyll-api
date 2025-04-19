@@ -55,26 +55,36 @@ class Location(BaseModel):
 SATELLITES = {"Sentinel-2": "COPERNICUS/S2_SR"}
 BANDS = {"Sentinel-2": {"Red": "B4", "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12", "Blue": "B2", "Green": "B3"}}
 
-# Fungsi untuk mendapatkan data citra satelit
+# Fungsi untuk membuat area 3x3 piksel (90x90 meter, approx)
+def get_rectangle_area(lat, lon, pixel_size=30, pixel_count=3):
+    offset = (pixel_size * pixel_count / 2) / 111320  # convert meters to degrees
+    return ee.Geometry.Rectangle([lon - offset, lat - offset, lon + offset, lat + offset])
+
+# Fungsi untuk mendapatkan data citra satelit dari area
 def get_satellite_data(lat, lon, collection_id, bands, target_date):
     try:
-        point = ee.Geometry.Point(lon, lat)
+        area = get_rectangle_area(lat, lon)
         start_date = ee.Date(target_date) if target_date else ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
         collection = (
             ee.ImageCollection(collection_id)
-            .filterBounds(point)
+            .filterBounds(area)
             .filterDate(start_date.advance(-30, 'day'), start_date.advance(30, 'day'))
         )
-        
+
         def add_diff(image):
             return image.set("date_diff", ee.Number(image.date().difference(start_date, "day")).abs())
-        
+
         collection = collection.map(add_diff).sort("date_diff")
         image = collection.first()
-        
+
         if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
-            data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
+            data = image.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=area,
+                scale=30,
+                maxPixels=1e9
+            ).getInfo()
             return {band: data.get(bands[band], None) for band in bands}, date_info
     except Exception as e:
         logging.error(f"Failed to retrieve satellite data: {e}")
@@ -83,19 +93,24 @@ def get_satellite_data(lat, lon, collection_id, bands, target_date):
 # Fungsi untuk mendapatkan data SST
 def get_sst_data(lat, lon, target_date):
     try:
-        point = ee.Geometry.Point(lon, lat)
+        area = get_rectangle_area(lat, lon, pixel_size=5000)  # SST pixel size ~5 km
         start_date = ee.Date(target_date) if target_date else ee.Date(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
         collection = (
             ee.ImageCollection("NOAA/CDR/OISST/V2_1")
-            .filterBounds(point)
+            .filterBounds(area)
             .filterDate(start_date, start_date.advance(1, 'day'))
             .sort("system:time_start")
         )
         image = collection.first()
-        
+
         if image is not None and image.getInfo():
             date_info = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
-            data = image.reduceRegion(ee.Reducer.mean(), point, 30).getInfo()
+            data = image.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=area,
+                scale=5000,
+                maxPixels=1e9
+            ).getInfo()
             return data.get("sst", None), date_info
     except Exception as e:
         logging.error(f"Failed to retrieve SST data: {e}")
@@ -110,31 +125,47 @@ def calculate_ndci(red, nir):
 # Fungsi utama untuk memproses prediksi
 def process_request(lat, lon, date):
     data_sources, dates = {}, {}
-    
+
     for sat in ["Sentinel-2"]:
         data, date_info = get_satellite_data(lat, lon, SATELLITES[sat], BANDS[sat], date)
         if data:
             data_sources[sat] = data
             dates[sat] = date_info
-    
+
     sst_value, sst_date = get_sst_data(lat, lon, date)
     selected_data = next((data_sources[sat] for sat in data_sources if data_sources[sat]), None)
-    
+
     if not selected_data:
         raise HTTPException(status_code=404, detail=f"No satellite data available for location ({lat}, {lon}) on {date}")
-    
-    features = {"latitude": lat, "longitude": lon, "SWIR1": selected_data.get("SWIR1"), "SWIR2": selected_data.get("SWIR2"), "Blue": selected_data.get("Blue"), "Green": selected_data.get("Green"), "Red": selected_data.get("Red"), "NIR": selected_data.get("NIR"), "sst": sst_value if sst_value is not None else 0}
-    
+
+    features = {
+        "latitude": lat,
+        "longitude": lon,
+        "SWIR1": selected_data.get("SWIR1"),
+        "SWIR2": selected_data.get("SWIR2"),
+        "Blue": selected_data.get("Blue"),
+        "Green": selected_data.get("Green"),
+        "Red": selected_data.get("Red"),
+        "NIR": selected_data.get("NIR"),
+        "sst": sst_value if sst_value is not None else 0
+    }
+
     features["dayofyear"] = datetime.datetime.strptime(dates["Sentinel-2"], "%Y-%m-%d").timetuple().tm_yday
     features["day_sin"] = np.sin(2 * np.pi * features["dayofyear"] / 365)
     features["day_cos"] = np.cos(2 * np.pi * features["dayofyear"] / 365)
     features["NDCI"] = calculate_ndci(features["Red"], features["NIR"])
-    
+
     input_data = np.array([[features[f] for f in features.keys()]])
     normalized_input = scaler.transform(input_data)
     chl_a_prediction = catboost_model.predict(normalized_input)[0]
-    
-    return {"lat": lat, "lon": lon, "Chlorophyll-a": chl_a_prediction * 1000, "dates": dates, "sst_date": sst_date}
+
+    return {
+        "lat": lat,
+        "lon": lon,
+        "Chlorophyll-a": chl_a_prediction * 1000,
+        "dates": dates,
+        "sst_date": sst_date
+    }
 
 @app.post("/predict")
 def predict_chlorophyll(data: Location):
@@ -149,4 +180,3 @@ def upload_file(file: UploadFile = File(...)):
 @app.get("/")
 def home():
     return {"message": "FastAPI is running. Use /predict or /upload for predictions."}
-
